@@ -31,6 +31,16 @@ def package_version():
 
 def cli_parser():
     import argparse
+
+    class MaxLineWidthAction(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):
+            # Appended to the --config overrides, so the last option wins.
+            namespace.config = [
+                *namespace.config,
+                'optimize.algorithm=adaptive',
+                f'optimize.max_line_width={values}',
+            ]
+
     p = argparse.ArgumentParser(
         description='SemBr: Rewrap text with semantic breaks.')
     p.add_argument(
@@ -42,6 +52,18 @@ def cli_parser():
     p.add_argument(
         '-c', '--config', action='append', default=[], metavar='KEY=VALUE',
         help='Override a config value from $XDG_CONFIG_HOME/sembr/config.toml')
+    p.add_argument(
+        '--adaptive', action='append_const', dest='config',
+        const='optimize.algorithm=adaptive',
+        help=(
+            'Break after sentences, and otherwise only to fit the line width. '
+            'Shorthand for -c optimize.algorithm=adaptive'))
+    p.add_argument(
+        '-w', '--max-line-width', action=MaxLineWidthAction, type=int,
+        metavar='WIDTH',
+        help=(
+            'Maximum line width in characters; implies --adaptive. '
+            'Shorthand for -c optimize.max_line_width=WIDTH'))
     p.add_argument('-l', '--listen', action='store_true')
     p.add_argument('--debug', action='store_true')
     p.add_argument('--mcp', action='store_true', help='Start MCP server mode')

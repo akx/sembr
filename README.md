@@ -273,10 +273,12 @@ The `adaptive` algorithm
 breaks lines only as much as the text needs:
 
 ```shell
-sembr -i <input_file> -o <output_file> \
-  -c optimize.algorithm=adaptive \
-  -c optimize.max_line_width=80
+sembr -i <input_file> -o <output_file> --adaptive
 ```
+
+`--adaptive` is shorthand for `-c optimize.algorithm=adaptive`.
+`-w <width>` (`--max-line-width`) also sets `optimize.max_line_width`,
+and implies `--adaptive`.
 
 It always breaks after a sentence,
 where the model agrees that the sentence has ended.

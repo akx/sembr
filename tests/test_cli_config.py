@@ -462,3 +462,18 @@ def test_removed_options_are_no_longer_cli_arguments():
     ]:
         assert option not in help_text
     assert '-c KEY=VALUE' in help_text
+
+
+@pytest.mark.parametrize('argv, expected', [
+    (['--adaptive'], ('adaptive', 80)),
+    (['-w', '100'], ('adaptive', 100)),
+    (['--adaptive', '--max-line-width', '100'], ('adaptive', 100)),
+    (['-w', '100', '-c', 'optimize.max_line_width=72'], ('adaptive', 72)),
+    ([], ('balanced_linebreaks', 80)),
+])
+def test_adaptive_shorthand_options_set_config(tmp_path, argv, expected):
+    args = cli_parser().parse_args(argv)
+
+    config = load_config(args.config, path=tmp_path / 'missing.toml')
+
+    assert (config['predict_func'], config['max_line_width']) == expected
