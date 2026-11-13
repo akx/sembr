@@ -14,6 +14,39 @@ from tree_sitter import Language, Parser
 from .base import BaseProcessor
 
 
+# A line ending in two spaces or a backslash is a hard line break.
+HARD_BREAK_RE = re.compile(r"(?: {2,}|\\)$")
+
+# Text that would start a new block if it began a line:
+# list items, block quotes, headings, setext underlines, thematic breaks,
+# fenced code and HTML.
+BLOCK_START_RE = re.compile(
+    r"(?:[-+*]|\d+[.)]|#{1,6}|=+|-+)(?:\s|$)|[>|<]|```|~~~|(?:[-*_]\s*){3,}(?:\s|$)"
+)
+
+# An inline or reference link or image, which is kept on one line.
+LINK_RE = re.compile(r"\[[^\[\]]*\](?:\([^()]*\)|\[[^\[\]]*\])")
+
+
+def _code_span_ranges(text: str) -> List[tuple[int, int]]:
+    """Find the character ranges of inline code spans in text."""
+    ranges = []
+    runs = list(re.finditer(r"`+", text))
+    i = 0
+    while i < len(runs):
+        opening = runs[i]
+        closing = next(
+            (r for r in runs[i + 1:] if len(r.group()) == len(opening.group())),
+            None,
+        )
+        if closing is None:
+            i += 1
+            continue
+        ranges.append((opening.start(), closing.end()))
+        i = runs.index(closing) + 1
+    return ranges
+
+
 class MarkdownProcessor(BaseProcessor):
     """
     Markdown processor
@@ -79,6 +112,10 @@ class MarkdownProcessor(BaseProcessor):
                         "start_byte": node.start_byte,
                         "end_byte": node.end_byte,
                         "node_type": "inline",
+                        "reflowable": (
+                            node.parent.type == "paragraph"
+                            and node.parent.parent.type != "setext_heading"
+                        ),
                         "continuation_prefix": continuation_info["prefix"],
                         "continuation_indent": continuation_info["indent"],
                     }
@@ -136,8 +173,14 @@ class MarkdownProcessor(BaseProcessor):
             region_text = region["text"]
             if not region_text.strip():
                 continue
-            # Simple processing - treat as single line of text
-            processed = self._process_text_simple(region_text)
+            if self.reflow:
+                processed = self._process_text_reflow(region)
+                if processed is None:
+                    # Left out of the results, so generate() keeps it as is.
+                    continue
+            else:
+                # Simple processing - treat as single line of text
+                processed = self._process_text_simple(region_text)
             processed.update(
                 {
                     "start_byte": region["start_byte"],
@@ -176,6 +219,61 @@ class MarkdownProcessor(BaseProcessor):
             "indents": indents,
             "base_indent": base_indent,
         }
+
+    def _process_text_reflow(self, region: Dict[str, Any]) -> Dict[str, Any] | None:
+        """
+        Join the existing lines of a paragraph into one line,
+        so that line breaks are decided from scratch.
+        Returns None for regions whose line structure must be kept.
+        """
+        if not region["reflowable"]:
+            return None
+        lines = region["text"].split("\n")
+        # A hard line break is part of the rendered output.
+        if any(HARD_BREAK_RE.search(line) for line in lines[:-1]):
+            return None
+        quote_depth = region["continuation_prefix"].count(">")
+        continuation_re = re.compile(r"[ \t]*(?:>[ \t]?){0,%d}[ \t]*" % quote_depth)
+        joined = [lines[0].strip()]
+        for line in lines[1:]:
+            joined.append(line[continuation_re.match(line).end():].rstrip())
+        flat_text = " ".join(line for line in joined if line)
+        text = self._original_text
+        line_start = text.rfind("\n", 0, region["start_byte"]) + 1
+        continuation = region["continuation_indent"] + region["continuation_prefix"]
+        return {
+            "flat_lines": self._process_specials([flat_text + "\n"])[0],
+            "modes": ["off"],
+            "mode_offsets": [(0, len(flat_text))],
+            "indents": [0],
+            "base_indent": 0,
+            "first_line_width": region["start_byte"] - line_start,
+            "continuation_width": len(continuation),
+        }
+
+    def _break_allowed(self, words: List[str]) -> List[bool]:
+        """
+        Mark the words a line break may be placed before
+        without changing how the paragraph is parsed or rendered.
+        """
+        text = "".join(words)
+        protected = [False] * (len(text) + 1)
+        ranges = _code_span_ranges(text)
+        ranges.extend(m.span() for m in LINK_RE.finditer(text))
+        for start, end in ranges:
+            protected[start:end] = [True] * (end - start)
+        allowed = []
+        pos = 0
+        for word in words:
+            stripped = word.lstrip()
+            allowed.append(
+                pos > 0
+                and stripped != word
+                and not protected[pos]
+                and not BLOCK_START_RE.match(text, pos + len(word) - len(stripped))
+            )
+            pos += len(word)
+        return allowed
 
     def _flatten_with_modes(
         self, lines: List[str], modes: List[str]
@@ -225,6 +323,10 @@ class MarkdownProcessor(BaseProcessor):
                 "continuation_prefix": r["continuation_prefix"],
                 "continuation_indent": r["continuation_indent"],
             }
+            if self.reflow:
+                tokenized["break_allowed"] = self._break_allowed(words)
+                tokenized["first_line_width"] = r["first_line_width"]
+                tokenized["continuation_width"] = r["continuation_width"]
             new_results.append(tokenized)
         return new_results
 
@@ -273,9 +375,14 @@ class MarkdownProcessor(BaseProcessor):
         # Use proper SemBr generation pipeline
         words, modes, indents = self._replace_newlines(words, modes, indents)
         lines, indents = self._generate_lines(words, modes, indents)
-        lines = self._indent_lines(lines, indents, base_indent)
+        if self.reflow:
+            # Indenting a continuation line can change what Markdown it is.
+            continuation = cont_indent + cont_prefix
+            lines = lines[:1] + [continuation + line for line in lines[1:]]
+        else:
+            lines = self._indent_lines(lines, indents, base_indent)
         # Apply continuation formatting to wrapped lines
-        if len(lines) > 1 and (cont_prefix or cont_indent):
+        if not self.reflow and len(lines) > 1 and (cont_prefix or cont_indent):
             formatted_lines = [lines[0]]
             for line in lines[1:]:
                 stripped = line.lstrip()

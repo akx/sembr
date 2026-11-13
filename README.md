@@ -206,7 +206,7 @@ The supported config keys are:
 * `optimize.algorithm`:
   The prediction function to use.
   Options are `argmax`, `logit_adjustment`, `greedy_linebreaks`,
-  and `balanced_linebreaks`.
+  `balanced_linebreaks`, and `adaptive`.
   Default is `balanced_linebreaks`.
 * `optimize.preferred_min_tokens_per_line`:
   Preferred lower line length target.
@@ -217,6 +217,10 @@ The supported config keys are:
 * `optimize.line_length_penalty_weight`:
   Penalty weight for line lengths outside the preferred range.
   The default is `0.05`.
+* `optimize.max_line_width`:
+  Maximum line width in characters
+  for the `adaptive` algorithm.
+  The default is `80`.
 * `format.num_spaces`:
   Number of spaces represented by one indentation level,
   or `auto` to detect `2`, `4`, or `8` from the input.
@@ -262,6 +266,37 @@ The optimization complexity is
 `O(n * l + n log n)`,
 where `l` is `optimize.preferred_min_tokens_per_line`.
 Memory usage is `O(n)` per paragraph.
+
+#### Adaptive line breaks
+
+The `adaptive` algorithm
+breaks lines only as much as the text needs:
+
+```shell
+sembr -i <input_file> -o <output_file> \
+  -c optimize.algorithm=adaptive \
+  -c optimize.max_line_width=80
+```
+
+It always breaks after a sentence,
+where the model agrees that the sentence has ended.
+A sentence that fits within `optimize.max_line_width` characters
+is otherwise kept on one line.
+A longer one is split with as few breaks as possible,
+at the positions the model finds most likely,
+so clause boundaries are preferred.
+A line may run a few characters over the width
+when the only alternative is a break the model finds unlikely,
+and unbreakable text such as a long link is left as it is.
+
+Line breaks are decided from scratch,
+so the result does not depend on how the input was wrapped.
+In Markdown, the existing lines of each paragraph are joined first.
+Paragraphs with hard line breaks, headings, and tables are left untouched,
+and no break is placed inside a code span or a link,
+or where it would start a new block.
+In LaTeX, a line break of the input is kept where the model agrees with it,
+which preserves the layout of environments.
 
 #### MCP Server
 

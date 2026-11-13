@@ -29,6 +29,7 @@ class SembrConfig(BaseModel):
         'logit_adjustment',
         'greedy_linebreaks',
         'balanced_linebreaks',
+        'adaptive',
     ] = Field(alias='optimize.algorithm')
     preferred_min_tokens_per_line: PositiveInt | None = Field(
         default=None, alias='optimize.preferred_min_tokens_per_line')
@@ -36,6 +37,7 @@ class SembrConfig(BaseModel):
         default=None, alias='optimize.preferred_max_tokens_per_line')
     line_length_penalty_weight: float = Field(
         ge=0, alias='optimize.line_length_penalty_weight')
+    max_line_width: PositiveInt = Field(alias='optimize.max_line_width')
     spaces: PositiveInt | Literal['auto'] = Field(
         alias='format.num_spaces')
     indent_type: Literal['space', 'tab', 'auto'] = Field(

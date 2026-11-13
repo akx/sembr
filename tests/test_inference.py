@@ -7,9 +7,68 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from sembr.inference import (
     _line_length_loss,
+    predict_adaptive_linebreaks,
     predict_balanced_linebreaks,
     predict_greedy_linebreaks,
 )
+
+ADAPTIVE_ID2LABEL = {0: 'off', 1: 'space-0', 2: 'nospace-0'}
+
+
+def _predict_adaptive(words, break_logits, max_line_width, **result):
+    """Predict with the given break logit per word against an off logit of 0."""
+    logits = torch.zeros((1, len(words), 3))
+    logits[0, :, 1] = torch.tensor(break_logits)
+    logits[0, :, 2] = -10.0
+    counts = torch.ones((1, len(words)), dtype=torch.long)
+    result = {'words': words, 'modes': ['off'] * len(words), **result}
+    preds = predict_adaptive_linebreaks(
+        logits, counts, results=[result], id2label=ADAPTIVE_ID2LABEL,
+        max_line_width=max_line_width)
+    return preds.tolist()[0]
+
+
+def test_adaptive_linebreaks_break_after_sentences_only_when_lines_fit():
+    words = ['One', ' two', ',', ' three', '.', ' Four', ' e', '.', ' five', '.']
+    # The model favors the clause break, but the line fits without it,
+    # and it rejects the break after the abbreviation.
+    break_logits = [-5, -5, -5, 3, -5, 5, -5, -5, -3, -5]
+
+    assert _predict_adaptive(words, break_logits, 80) == [
+        0, 0, 0, 0, 0, 1, 0, 0, 0, 0]
+
+
+def test_adaptive_linebreaks_split_long_lines_at_likeliest_allowed_breaks():
+    words = ['aaaa', ' bbbb', ' cccc', ' dddd', ' eeee', ' ffff']
+    break_logits = [-5, -4, 2, 3, -1, -4]
+
+    assert _predict_adaptive(words, break_logits, 20) == [0, 0, 0, 1, 0, 0]
+    assert _predict_adaptive(
+        words, break_logits, 20,
+        break_allowed=[False, True, True, False, True, True],
+    ) == [0, 0, 1, 0, 0, 0]
+    # The continuation indent counts towards the width.
+    assert _predict_adaptive(
+        words, break_logits, 20, continuation_width=12,
+    ) == [0, 0, 0, 0, 1, 0]
+
+
+def test_adaptive_linebreaks_overflow_rather_than_break_at_unlikely_spot():
+    words = ['aaaa', ' bbbb', ' cccc', ' dddd', ' eeee', ' ffff']
+    break_logits = [-9, -9, -9, -8, -9, -9]
+
+    # A few characters over the width cost less than an unlikely break,
+    # but a line never overflows by much when it can be broken.
+    assert _predict_adaptive(words, break_logits, 25) == [0, 0, 0, 0, 0, 0]
+    assert _predict_adaptive(words, break_logits, 4) == [0, 0, 0, 1, 0, 0]
+
+
+def test_adaptive_linebreaks_keep_input_line_breaks_the_model_agrees_with():
+    words = ['aaaa', ' bbbb', ' cccc', ' dddd']
+    result = _predict_adaptive(
+        words, [-5, 3, -3, 3], 80, modes=['off', 'space', 'space', 'off'])
+
+    assert result == [0, 1, 0, 0]
 
 
 def test_balanced_linebreaks_uses_best_break_label():

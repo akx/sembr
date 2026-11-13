@@ -306,6 +306,15 @@ def test_load_config_accepts_balanced_linebreak_range(tmp_path):
     assert config['line_length_penalty_weight'] == 0.05
 
 
+def test_load_config_accepts_adaptive_max_line_width_override(tmp_path):
+    config = load_config(
+        ['optimize.algorithm=adaptive', 'optimize.max_line_width=100'],
+        path=tmp_path / 'missing.toml')
+
+    assert config['predict_func'] == 'adaptive'
+    assert config['max_line_width'] == 100
+
+
 def test_load_config_accepts_balanced_linebreak_range_override(tmp_path):
     config = load_config(
         [

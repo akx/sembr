@@ -1,3 +1,4 @@
+import re
 from collections import deque
 
 import numpy as np
@@ -5,6 +6,18 @@ from tqdm import trange
 
 
 DEFAULT_LINE_LENGTH_PENALTY_WEIGHT = 0.05
+DEFAULT_MAX_LINE_WIDTH = 80
+NEWLINE_TOKEN = '[newline]'
+# Sentence-ending punctuation, optionally followed by closing quotes,
+# brackets or markup.
+SENTENCE_END_RE = re.compile(r'[.!?…]["\'”’)\]*_`]*$')
+# The adaptive algorithm prices a break at -log(p), capped at this value,
+# and a character beyond the maximum line width at ADAPTIVE_OVERFLOW_COST.
+# A line may thus run a few characters over rather than break at a spot
+# the model considers unlikely, but never by more than
+# ADAPTIVE_MAX_BREAK_COST / ADAPTIVE_OVERFLOW_COST characters if it can break.
+ADAPTIVE_MAX_BREAK_COST = 12.0
+ADAPTIVE_OVERFLOW_COST = 0.5
 
 
 def _parse_positive_int(name, value):
@@ -319,6 +332,7 @@ def predict_balanced_linebreaks(
     preferred_min_tokens_per_line=None,
     preferred_max_tokens_per_line=None,
     line_length_penalty_weight=DEFAULT_LINE_LENGTH_PENALTY_WEIGHT,
+    **kwargs
 ):
     logits = _as_numpy(logits)
     counts = _as_numpy(counts)
@@ -413,12 +427,111 @@ def predict_balanced_linebreaks(
     return preds
 
 
+def _adaptive_breaks(
+    words, break_costs, allowed, max_line_width,
+    first_line_width=0, continuation_width=0, line_starts=None,
+):
+    """
+    Choose the words to break before:
+    always where the model agrees with a sentence end
+    or with a line break of the input (the words in line_starts),
+    and otherwise only where a line would exceed max_line_width,
+    at the breaks the model finds most likely.
+    """
+    num_words = len(words)
+    prefix = [0]
+    for word in words:
+        prefix.append(
+            prefix[-1] + (0 if word == NEWLINE_TOKEN else len(word)))
+
+    def width(start, stop):
+        offset = first_line_width if start == 0 else continuation_width
+        leading = len(words[start]) - len(words[start].lstrip())
+        return offset + prefix[stop] - prefix[start] - leading
+
+    candidates = [i for i in range(1, num_words) if allowed[i]]
+    breaks = {
+        i for i in candidates
+        if break_costs[i] <= -np.log(0.5) and (
+            (line_starts is not None and line_starts[i])
+            or SENTENCE_END_RE.search(
+                ''.join(words[max(0, i - 8):i]).rstrip()))}
+    fixed = {0, num_words} | breaks
+    fixed.update(
+        i + 1 for i, word in enumerate(words[:-1]) if word == NEWLINE_TOKEN)
+    fixed = sorted(fixed)
+
+    max_overflow = ADAPTIVE_MAX_BREAK_COST / ADAPTIVE_OVERFLOW_COST
+    for start, stop in zip(fixed, fixed[1:]):
+        nodes = [start, *(i for i in candidates if start < i < stop), stop]
+        best = [0.0] + [float('inf')] * (len(nodes) - 1)
+        prev = [0] * len(nodes)
+        for j in range(1, len(nodes)):
+            for i in range(j - 1, -1, -1):
+                overflow = max(0, width(nodes[i], nodes[j]) - max_line_width)
+                # Longer lines only overflow more; the shortest is always
+                # considered, as it may be a single unbreakable word.
+                if overflow > max_overflow and i < j - 1:
+                    break
+                cost = best[i] + overflow * ADAPTIVE_OVERFLOW_COST
+                if cost < best[j]:
+                    best[j], prev[j] = cost, i
+            best[j] += break_costs[nodes[j]] if j < len(nodes) - 1 else 0.0
+        j = prev[-1]
+        while j > 0:
+            breaks.add(nodes[j])
+            j = prev[j]
+    return sorted(breaks)
+
+
+def predict_adaptive_linebreaks(
+    logits, counts, results=None, id2label=None,
+    max_line_width=DEFAULT_MAX_LINE_WIDTH, **kwargs
+):
+    if results is None or id2label is None:
+        raise ValueError(
+            'The adaptive algorithm requires results and id2label.')
+    logits = _as_numpy(logits)
+    counts = _as_numpy(counts)
+    # Breaks are only placed at existing whitespace, never with a "nospace"
+    # label, which would add a comment character to hide the line break.
+    space_labels = np.array(sorted(
+        i for i, name in id2label.items() if name.startswith('space-')))
+    preds = np.zeros(logits.shape[:2], dtype=np.int64)
+    for b, result in enumerate(results):
+        words = result['words']
+        if not words:
+            continue
+        row_logits = logits[b, :len(words)]
+        break_costs = np.minimum(
+            -_logsumexp(_log_softmax(row_logits, axis=1)[:, 1:], axis=1),
+            ADAPTIVE_MAX_BREAK_COST)
+        allowed = result.get('break_allowed')
+        if allowed is None:
+            allowed = [
+                i > 0 and word != word.lstrip()
+                for i, word in enumerate(words)]
+        breaks = _adaptive_breaks(
+            words, break_costs.tolist(), allowed, max_line_width,
+            result.get('first_line_width', 0),
+            result.get('continuation_width', 0),
+            [mode != 'off' for mode in result['modes']])
+        for i in breaks:
+            preds[b, i] = space_labels[row_logits[i, space_labels].argmax()]
+    return preds
+
+
 PREDICT_FUNC_MAP = {
     'argmax': predict_argmax,
     'logit_adjustment': predict_logit_adjustment,
     'greedy_linebreaks': predict_greedy_linebreaks,
     'balanced_linebreaks': predict_balanced_linebreaks,
+    'adaptive': predict_adaptive_linebreaks,
 }
+
+# Algorithms that decide every line break themselves,
+# so processors should not carry over the existing ones.
+REFLOW_PREDICT_FUNCS = {'adaptive'}
 
 
 def inference(
@@ -427,9 +540,11 @@ def inference(
     *,
     preferred_min_tokens_per_line=None, preferred_max_tokens_per_line=None,
     line_length_penalty_weight=DEFAULT_LINE_LENGTH_PENALTY_WEIGHT,
+    max_line_width=DEFAULT_MAX_LINE_WIDTH,
 ):
     if text.strip() == '':
         return []
+    processor.reflow = predict_func in REFLOW_PREDICT_FUNCS
 
     if getattr(model, 'device', None) == 'mlx':
         from .mlx import NumpyTokenClassificationCollator
@@ -449,6 +564,9 @@ def inference(
         preferred_min_tokens_per_line=preferred_min_tokens_per_line,
         preferred_max_tokens_per_line=preferred_max_tokens_per_line,
         line_length_penalty_weight=line_length_penalty_weight,
+        max_line_width=max_line_width,
+        results=results,
+        id2label=model.config.id2label,
     )
     return _format_labels(model.config.id2label, preds, counts, results)
 
@@ -459,6 +577,7 @@ def sembr(
     *,
     preferred_min_tokens_per_line=None, preferred_max_tokens_per_line=None,
     line_length_penalty_weight=DEFAULT_LINE_LENGTH_PENALTY_WEIGHT,
+    max_line_width=DEFAULT_MAX_LINE_WIDTH,
     **_,
 ):
     results = inference(
@@ -466,5 +585,6 @@ def sembr(
         batch_size, overlap_divisor,
         preferred_min_tokens_per_line=preferred_min_tokens_per_line,
         preferred_max_tokens_per_line=preferred_max_tokens_per_line,
-        line_length_penalty_weight=line_length_penalty_weight)
+        line_length_penalty_weight=line_length_penalty_weight,
+        max_line_width=max_line_width)
     return processor.generate(results, join=True)

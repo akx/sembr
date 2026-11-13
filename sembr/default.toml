@@ -23,12 +23,17 @@ overlap_divisor = 8
 
 [optimize]
 # Prediction algorithm, supports:
-#   argmax, logit_adjustment, greedy_linebreaks, or balanced_linebreaks.
+#   argmax, logit_adjustment, greedy_linebreaks, balanced_linebreaks,
+#   or adaptive.
 algorithm = "balanced_linebreaks"
 preferred_min_tokens_per_line = 8
 preferred_max_tokens_per_line = 10
 # Penalty weight for line lengths outside the preferred range.
 line_length_penalty_weight = 0.05
+# Maximum line width in characters for the adaptive algorithm,
+# which breaks after each sentence
+# and otherwise only as needed to keep lines within this width.
+max_line_width = 80
 
 [format]
 # Number of spaces represented by one indentation level.

@@ -15,6 +15,11 @@ class BaseProcessor(ABC):
     for a specific file type using appropriate grammars.
     """
 
+    # Set by inference when the prediction algorithm decides line breaks from
+    # scratch; processors that support it then discard existing line breaks
+    # instead of keeping them.
+    reflow = False
+
     def __init__(self, spaces: int | str = 4, indent_type: str = "space"):
         """
         Initialize processor.
